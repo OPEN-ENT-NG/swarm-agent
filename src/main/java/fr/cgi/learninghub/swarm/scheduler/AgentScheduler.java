@@ -77,7 +77,9 @@ AgentScheduler {
                 // 5. Reactivate services
                 .chain(() -> deploymentRepository.listDeploymentsWhereServiceInState(List.of(State.REACTIVATION_SCHEDULED)).onItem().transformToUni(this::reactivateDeployments))
                 // 6. Recheck if the pod is ready and switch to deployed
-                .chain(() -> deploymentRepository.listDeploymentsWhereServiceInState(List.of(State.IN_PROGRESS)).onItem().transformToUni(this::checkInProgressDeployments));
+                .chain(() -> deploymentRepository.listDeploymentsWhereServiceInState(List.of(State.IN_PROGRESS)).onItem().transformToUni(this::checkInProgressDeployments))
+                // 7. Recheck if the pod is ready and switch to deployed
+                .chain(() -> deploymentRepository.listDeploymentsWhereServiceInState(List.of(State.RESET_IN_PROGRESS)).onItem().transformToUni(this::checkInProgressDeployments));
     }
 
     private Uni<Void> checkInProgressDeployments(List<Deployment> deployments) {
@@ -91,6 +93,11 @@ AgentScheduler {
         return this.updateServiceStateToReactivationInProgress(deployments)
                 // 2. reactivate services
                 .chain(this::reactivateServices)
+                // 3. remove Ingress with 403 on admin page
+                .chain(this::deleteIngress)
+                .chain(this::removeDeploymentsInError)
+                .chain(this::createIngress)
+                .chain(this::removeDeploymentsInError)
                 // 3. update service state to disabled
                 .chain(this::updateServicesStateToDeployed)
                 .replaceWithVoid();
@@ -104,6 +111,11 @@ AgentScheduler {
                 .chain(this::removeDeploymentsInError)
                 // 3. update service state to disabled
                 .chain(this::updateServiceStateToDisabled)
+                // 4. Ingress with 403 on admin page
+                .chain(this::deleteIngress)
+                .chain(this::removeDeploymentsInError)
+                .chain(this::createIngress)
+                .chain(this::removeDeploymentsInError)
                 .replaceWithVoid();
     }
 
@@ -419,7 +431,7 @@ AgentScheduler {
     }
 
     private Uni<Boolean> isDeploymentReady(Deployment deployment) {
-        return vertx.executeBlocking(() -> {
+        Uni<Boolean> podsReady = vertx.executeBlocking(() -> {
             var pods = k8sClient.pods()
                     .inNamespace(clusterConfiguration.getK8sNamespace())
                     .withLabel("app", deployment.getService().getServiceName())
@@ -430,6 +442,16 @@ AgentScheduler {
                     .filter(this::isServiceType)
                     .allMatch(this::isServiceReady);
         });
+
+        Uni<Boolean> siteReady = databaseFactory.getDatabaseService(deployment.getService()).isInstalled(deployment);
+
+        return Uni.combine().all().unis(podsReady, siteReady)
+                .combinedWith(results -> {
+                    boolean podsOk = (Boolean) results.get(0);
+                    boolean sitesOk = (Boolean) results.get(1);
+                    Log.infov("Pod and Site are ready for service {0} ? : {1}", deployment.getService().getServiceName(), podsOk && sitesOk);
+                    return podsOk && sitesOk;
+                });
     }
 
     private Uni<List<Deployment>> keepReadyDeployments(List<Deployment> deployments) {

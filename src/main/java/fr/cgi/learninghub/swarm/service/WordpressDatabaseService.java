@@ -57,4 +57,17 @@ public class WordpressDatabaseService extends DatabaseService {
                 .replaceWith(deployment);
     }
 
+    public Uni<Boolean> isInstalled(Deployment deployment) {
+        if (Objects.isNull(deployment.getDatabase())) {
+            return Uni.createFrom().failure(new NullDatabaseException());
+        }
+
+        var transientRecord = new TransientRecord(getDeploymentPool(deployment), deployment);
+
+        return transientRecord.pool()
+                .preparedQuery("SELECT 1 FROM wp_users LIMIT 1;")
+                .execute()
+                .onItem().transform(rows -> rows.size() > 0)
+                .onFailure().recoverWithItem(false);
+    }
 }

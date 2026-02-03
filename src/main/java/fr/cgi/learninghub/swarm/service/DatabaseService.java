@@ -131,6 +131,8 @@ public abstract class DatabaseService {
 
     public abstract Uni<Deployment> createOwnerAdminUser(Deployment deployment, String adminUsername, String adminPassword);
 
+    public abstract Uni<Boolean> isInstalled(Deployment deployment);
+
     protected record TransientRecord(Pool pool, Deployment deployment) {
     }
 }
