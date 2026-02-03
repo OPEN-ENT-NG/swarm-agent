@@ -75,7 +75,15 @@ AgentScheduler {
                 // 4. Deactivate services
                 .chain(() -> deploymentRepository.listDeploymentsWhereServiceInState(List.of(State.DEACTIVATION_SCHEDULED)).onItem().transformToUni(this::deactivateDeployments))
                 // 5. Reactivate services
-                .chain(() -> deploymentRepository.listDeploymentsWhereServiceInState(List.of(State.REACTIVATION_SCHEDULED)).onItem().transformToUni(this::reactivateDeployments));
+                .chain(() -> deploymentRepository.listDeploymentsWhereServiceInState(List.of(State.REACTIVATION_SCHEDULED)).onItem().transformToUni(this::reactivateDeployments))
+                // 6. Recheck if the pod is ready and switch to deployed
+                .chain(() -> deploymentRepository.listDeploymentsWhereServiceInState(List.of(State.IN_PROGRESS)).onItem().transformToUni(this::checkInProgressDeployments));
+    }
+
+    private Uni<Void> checkInProgressDeployments(List<Deployment> deployments) {
+        return keepReadyDeployments(deployments).chain(this::createIngress).chain(this::removeDeploymentsInError)
+                .chain(this::updateServicesStateToDeployed)
+                .replaceWithVoid();
     }
 
     private Uni<Void> reactivateDeployments(List<Deployment> deployments) {
@@ -105,6 +113,8 @@ AgentScheduler {
                 // 2. Delete service from kubernetes
                 .chain(this::deleteFromK8s)
                 .chain(this::removeDeploymentsInError)
+                .chain(this::deleteIngress)
+                .chain(this::removeDeploymentsInError)
                 // 3. Delete remote database user and database
                 .chain(this::cleanDatabase)
                 .chain(this::removeDeploymentsInError)
@@ -120,6 +130,17 @@ AgentScheduler {
                 // 8. Create CRD and send CRD to Kubernetes cluster
                 .chain(this::deployToK8s)
                 .chain(this::removeDeploymentsInError)
+                .onItem().transform(newdeployments -> {
+                    deployments.forEach(deployment -> Log.infov("[Service {0}] deployment created {1}", deployment.getService().getId(), deployment.toString()));
+
+                    return deployments;
+                })
+                // 9. Check the pod is ready
+                .chain(this::keepReadyDeployments)
+                .chain(this::createIngress)
+                .chain(this::removeDeploymentsInError)
+                //10. If pod is ready, change state to DEPLOYED
+                .chain(this::updateServicesStateToDeployed)
                 .replaceWithVoid();
     }
 
@@ -130,7 +151,8 @@ AgentScheduler {
                 .chain(this::deleteFromK8s)
                 .chain(this::removeDeploymentsInError)
                 // 4. Update ingress
-                .chain(this::generateAndUpdateIngress)
+                .chain(this::deleteIngress)
+                .chain(this::removeDeploymentsInError)
                 // 5. Delete remote database user and database
                 .chain(this::cleanDatabase)
                 .chain(this::removeDeploymentsInError)
@@ -162,12 +184,18 @@ AgentScheduler {
                 // 7. Create CRD and send CRD to Kubernetes cluster
                 .chain(this::deployToK8s)
                 .chain(this::removeDeploymentsInError)
-                // 8. If failure, update service state to DEPLOYMENT_IN_ERROR and try to recover
+                // 8. log
                 .onItem().transform(deployments -> {
                     deployments.forEach(deployment -> Log.infov("[Service {0}] deployment created {1}", deployment.getService().getId(), deployment.toString()));
 
                     return deployments;
                 })
+                // 9. Check the pod is ready
+                .chain(this::keepReadyDeployments)
+                .chain(this::createIngress)
+                .chain(this::removeDeploymentsInError)
+                //10. If pod is ready, change state to DEPLOYED
+                .chain(this::updateServicesStateToDeployed)
                 .replaceWithVoid();
     }
 
@@ -178,8 +206,12 @@ AgentScheduler {
                     }
 
                     return Panache.withTransaction(() -> {
-                                deployment.getService().setAdminUser(String.format("%s@%s", deployment.getService().getLogin(), clusterConfiguration.getPsEmailHostname()));
-                                deployment.getService().setAdminPassword(UserUtils.generatePassword());
+                                final String adminUser = String.format("%s@%s", deployment.getService().getId(), clusterConfiguration.getPsEmailHostname());
+                                final String adminPwd = UserUtils.generatePassword();
+                                deployment.getService().setAdminUser(adminUser);
+                                deployment.getService().setAdminPassword(adminPwd);
+                                deployment.getService().setOwnerAdminUser(adminUser);
+                                deployment.getService().setOwnerAdminPassword(adminPwd);
 
                                 return serviceRepository.persist(deployment.getService()).replaceWith(deployment);
                             })
@@ -197,8 +229,12 @@ AgentScheduler {
                     }
 
                     return Panache.withTransaction(() -> {
-                                deployment.getService().setAdminUser(String.format("%s@%s", deployment.getService().getLogin(), clusterConfiguration.getWpEmailHostname()));
-                                deployment.getService().setAdminPassword(UserUtils.generatePassword());
+                                final String adminUser = String.format("%s@%s", deployment.getService().getId(), clusterConfiguration.getWpEmailHostname());
+                                final String adminPwd = UserUtils.generatePassword();
+                                deployment.getService().setAdminUser(adminUser);
+                                deployment.getService().setAdminPassword(adminPwd);
+                                deployment.getService().setOwnerAdminUser(adminUser);
+                                deployment.getService().setOwnerAdminPassword(adminPwd);
 
                                 return serviceRepository.persist(deployment.getService()).replaceWith(deployment);
                             })
@@ -296,30 +332,115 @@ AgentScheduler {
                 .concatenate().collect().asList();
     }
 
-    private Uni<List<Deployment>> generateAndUpdateIngress(List<Deployment> deployments) {
+    private Uni<List<Deployment>> deleteIngress(List<Deployment> deployments) {
         if (deployments.isEmpty()) {
             return Uni.createFrom().item(deployments);
         }
 
-        Log.info("Generating and updating Ingress");
-        return deploymentRepository.listDeploymentsWhereServiceInState(List.of(State.DEPLOYED, State.DISABLED))
-                .onItem().transformToUni(allDeployments -> {
-                    if (allDeployments.isEmpty()) {
-                        // If no valid deployments found in database, just remove the ingress to avoid an error
-                        return vertx.executeBlocking(() -> {
-                            Log.info("No deployments found in database, removing the ingress");
-                            return k8sClient.network().v1().ingresses().inNamespace(clusterConfiguration.getK8sNamespace()).withName(clusterConfiguration.getIngressName()).delete();
-                        }).onItem().transform(unused -> deployments);
-                    }
+        Log.info("Deleting Ingress");
 
-                    var ingress = new NginxIngress(allDeployments, clusterConfiguration.getIngressName())
-                            .setPublicHostName(clusterConfiguration.getServicePublicHostname())
-                            .setTlsSecret(clusterConfiguration.getTlsSecretName());
-                    return vertx.executeBlocking(() -> k8sClient.network().v1().ingresses().inNamespace(clusterConfiguration.getK8sNamespace()).resource(ingress.get()).createOr(NonDeletingOperation::update));
+        return Multi.createFrom().iterable(deployments)
+                .onItem().transformToUniAndConcatenate(deployment -> {
+                    return vertx.executeBlocking(() -> {
+                                Log.infov(
+                                        "Deleting ingress {0}-{1}",
+                                        deployment.getService().getType().getValue().toLowerCase(),
+                                        deployment.getService().getId()
+                                );
+
+                                return k8sClient.network()
+                                        .v1()
+                                        .ingresses()
+                                        .inNamespace(clusterConfiguration.getK8sNamespace())
+                                        .withName(
+                                                "%s-%s".formatted(
+                                                        deployment.getService().getType().getValue().toLowerCase(),
+                                                        deployment.getService().getId()
+                                                )
+                                        )
+                                        .delete();
+                            })
+                            .replaceWith(deployment)
+                            .onFailure().recoverWithUni(t ->
+                                    setDeploymentError(
+                                            deployment,
+                                            t.getMessage(),
+                                            State.DELETION_IN_ERROR
+                                    )
+                            );
                 })
-                .onItem().transform(unused -> deployments);
+                .collect().asList();
     }
 
+
+    private Uni<List<Deployment>> createIngress(List<Deployment> deployments) {
+        if (deployments.isEmpty()) {
+            return Uni.createFrom().item(deployments);
+        }
+
+        Log.info("Creating Ingress");
+
+        return Multi.createFrom().iterable(deployments)
+                .onItem().transformToUniAndConcatenate(deployment -> {
+
+                    var ingress = new NginxIngress(
+                            List.of(deployment),
+                            "%s-%s".formatted(
+                                    deployment.getService().getType().getValue().toLowerCase(),
+                                    deployment.getService().getId()
+                            )
+                    ).setPublicHostName(clusterConfiguration.getServicePublicHostname())
+                     .setTlsSecret(clusterConfiguration.getTlsSecretName());
+
+                    Log.infov(
+                            "Creating ingress {0}-{1}",
+                            deployment.getService().getType().getValue().toLowerCase(),
+                            deployment.getService().getId()
+                    );
+
+                    return vertx.executeBlocking(() ->
+                                    k8sClient.network()
+                                            .v1()
+                                            .ingresses()
+                                            .inNamespace(clusterConfiguration.getK8sNamespace())
+                                            .resource(ingress.get())
+                                            .createOr(NonDeletingOperation::update)
+                            )
+                            .replaceWith(deployment)
+                            .onFailure().recoverWithUni(t ->
+                                    setDeploymentError(
+                                            deployment,
+                                            t.getMessage(),
+                                            State.DEPLOYMENT_IN_ERROR
+                                    )
+                            );
+                })
+                .collect().asList();
+    }
+
+    private Uni<Boolean> isDeploymentReady(Deployment deployment) {
+        return vertx.executeBlocking(() -> {
+            var pods = k8sClient.pods()
+                    .inNamespace(clusterConfiguration.getK8sNamespace())
+                    .withLabel("app", deployment.getService().getServiceName())
+                    .list()
+                    .getItems();
+
+            return pods.stream()
+                    .filter(this::isServiceType)
+                    .allMatch(this::isServiceReady);
+        });
+    }
+
+    private Uni<List<Deployment>> keepReadyDeployments(List<Deployment> deployments) {
+        return Multi.createFrom().iterable(deployments)
+                .onItem().transformToUniAndConcatenate(deployment ->
+                        isDeploymentReady(deployment)
+                                .onItem().transform(isReady -> isReady ? deployment : null)
+                )
+                .filter(d -> d != null)
+                .collect().asList();
+    }
 
     private boolean isServiceType(Pod pod) {
         return PRESTASHOP.equals(pod.getSpec().getContainers().getFirst().getName()) ||
@@ -372,6 +493,11 @@ AgentScheduler {
     }
 
     private Uni<Deployment> setDeploymentError(Deployment deployment, String error, State errorState) {
+        Log.errorv(
+                "ERROR {0}, {1}-{2} : {3}", errorState.getValue(),
+                deployment.getService().getType().getValue(),
+                deployment.getService().getId(), error
+        );
         return deploymentRepository.setError(deployment, error).onItem().transformToUni(dep -> updateServiceState(dep, errorState));
     }
 
