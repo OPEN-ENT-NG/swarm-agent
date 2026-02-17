@@ -402,7 +402,8 @@ AgentScheduler {
                                     deployment.getService().getId()
                             )
                     ).setPublicHostName(clusterConfiguration.getServicePublicHostname())
-                     .setTlsSecret(clusterConfiguration.getTlsSecretName());
+                     .setTlsSecret(clusterConfiguration.getTlsSecretName())
+                     .setIngressClassName(clusterConfiguration.getIngressClassName());
 
                     Log.infov(
                             "Creating ingress {0}-{1}",

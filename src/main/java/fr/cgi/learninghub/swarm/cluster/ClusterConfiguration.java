@@ -27,6 +27,9 @@ public class ClusterConfiguration {
     @ConfigProperty(name = "swarm.agent.kubernetes.ingress.name", defaultValue = "swarm-ingress")
     private String ingressName;
 
+    @ConfigProperty(name = "swarm.agent.kubernetes.ingress.class.name", defaultValue = "nginx")
+    private String ingressClassName;
+
     public String getK8sNamespace() {
         return k8sNamespace;
     }
@@ -69,6 +72,15 @@ public class ClusterConfiguration {
 
     public ClusterConfiguration setIngressName(String ingressName) {
         this.ingressName = ingressName;
+        return this;
+    }
+
+    public String getIngressClassName() {
+        return ingressClassName;
+    }
+
+    public ClusterConfiguration setIngressClassName(String ingressClassName) {
+        this.ingressClassName = ingressClassName;
         return this;
     }
 

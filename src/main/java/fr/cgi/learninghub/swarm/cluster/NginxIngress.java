@@ -17,14 +17,14 @@ public class NginxIngress {
     public static final String METADATA_LABELS_APP_VALUE = "agent";
     public static final String METADATA_ANNOTATIONS_INGRESS_CLASS = "kubernetes.io/ingress.class";
     public static final String METADATA_ANNOTATIONS_SERVER_SNIPPETS = "nginx.ingress.kubernetes.io/server-snippet";
-    public static final String METADATA_ANNOTATIONS_INGRESS_CLASS_VALUE = "nginx";
-    public static final String INGRESS_CLASS = "nginx";
+    public static final String DEFAULT_INGRESS_CLASS = "nginx";
     private final List<Deployment> deployments;
 
     private String publicHostName;
     private String tlsSecret;
     private String ingressOauth2ProxyAuthUrl;
     private String ingressOauth2ProxyAuthSignInUrl;
+    private String ingressClassName = DEFAULT_INGRESS_CLASS;
 
     private String ingressName;
 
@@ -88,7 +88,7 @@ public class NginxIngress {
         var metadataBuilder = new ObjectMetaBuilder()
                 .withName(ingressName)
                 .addToLabels(METADATA_LABELS_APP, METADATA_LABELS_APP_VALUE)
-                .addToAnnotations(METADATA_ANNOTATIONS_INGRESS_CLASS, METADATA_ANNOTATIONS_INGRESS_CLASS_VALUE);
+                .addToAnnotations(METADATA_ANNOTATIONS_INGRESS_CLASS, ingressClassName);
 
         if (!disabledDeployments.isEmpty()) {
             StringBuilder snippet = new StringBuilder();
@@ -115,7 +115,7 @@ public class NginxIngress {
 
     private IngressSpec getSpec() {
         return new IngressSpecBuilder()
-                .withIngressClassName(INGRESS_CLASS)
+                .withIngressClassName(ingressClassName)
                 .withTls(getTls())
                 .withRules(getRules())
                 .build();
@@ -145,6 +145,15 @@ public class NginxIngress {
 
     public NginxIngress setIngressName(String ingressName) {
         this.ingressName = ingressName;
+        return this;
+    }
+
+    public String getIngressClassName() {
+        return ingressClassName;
+    }
+
+    public NginxIngress setIngressClassName(String ingressClassName) {
+        this.ingressClassName = ingressClassName;
         return this;
     }
 }
