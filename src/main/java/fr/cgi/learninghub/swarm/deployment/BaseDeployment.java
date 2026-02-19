@@ -79,6 +79,13 @@ public abstract class BaseDeployment {
         public static final String USER = "user";
     }
 
+    public static class StorageSpecFields {
+        public static final String SPEC_NAME = "storage";
+        public static final String SIZE = "size";
+        public static final String STORAGE_CLASS_NAME = "storageClassName";
+        public static final String ACCESS_MODES = "accessModes";
+    }
+
     static class MetadataFields {
         public static final String NAME = "name";
         public static final String LABELS = "labels";
@@ -112,12 +119,14 @@ public abstract class BaseDeployment {
 
         private HashMap<String, Object> site;
         private HashMap<String, Object> database;
+        private HashMap<String, Object> storage;
 
         public BaseDeploymentSpec(Deployment deployment, DatabaseSecret dbSecret) {
             this.deployment = deployment;
             this.dbSecret = dbSecret;
             this.site = siteSpecs();
             this.database = databaseSpecs();
+            this.storage = null;
         }
 
         public HashMap<String, Object> databaseSpecs() {
@@ -152,12 +161,21 @@ public abstract class BaseDeployment {
             return this;
         }
 
+        public BaseDeploymentSpec setStorageSpecs(HashMap<String, Object> storageSpecs) {
+            this.storage = storageSpecs;
+            return this;
+        }
+
         public HashMap<String, Object> getSite() {
             return site;
         }
 
         public HashMap<String, Object> getDatabase() {
             return database;
+        }
+
+        public HashMap<String, Object> getStorage() {
+            return storage;
         }
     }
 }

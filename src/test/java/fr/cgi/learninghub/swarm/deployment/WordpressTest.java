@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
+import java.util.List;
 import java.util.Map;
 
 @QuarkusTest
@@ -144,5 +145,23 @@ public class WordpressTest {
         // Check passwordSecretKey data
         Assertions.assertTrue(dbSpec.containsKey(BaseDeployment.DatabaseSpecFields.PASSWORD_SECRET_KEY));
         Assertions.assertEquals(DatabaseSecret.PASSWORD, dbSpec.get(BaseDeployment.DatabaseSpecFields.PASSWORD_SECRET_KEY));
+    }
+
+    @Test
+    @DisplayName("CRD spec should contains a storage nested spec with the default data")
+    public void testStorageSpecDefaults() {
+        var cr = wordpress.getManifest();
+        var spec = (BaseDeployment.BaseDeploymentSpec) cr.getSpec();
+
+        var storageSpec = (Map<String, Object>) spec.getStorage();
+        Assertions.assertNotNull(storageSpec);
+
+        Assertions.assertTrue(storageSpec.containsKey(BaseDeployment.StorageSpecFields.SIZE));
+        Assertions.assertEquals("1Gi", storageSpec.get(BaseDeployment.StorageSpecFields.SIZE));
+
+        Assertions.assertTrue(storageSpec.containsKey(BaseDeployment.StorageSpecFields.ACCESS_MODES));
+        Assertions.assertEquals(List.of("ReadWriteOnce"), storageSpec.get(BaseDeployment.StorageSpecFields.ACCESS_MODES));
+
+        Assertions.assertFalse(storageSpec.containsKey(BaseDeployment.StorageSpecFields.STORAGE_CLASS_NAME));
     }
 }

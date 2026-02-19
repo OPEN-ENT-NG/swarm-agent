@@ -12,6 +12,7 @@ import io.fabric8.kubernetes.model.annotation.Kind;
 import io.fabric8.kubernetes.model.annotation.Version;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.UUID;
 
 @Group("fr.cgi.learninghub.swarm")
@@ -32,7 +33,15 @@ public class WordpressCustomResource extends CustomResource<BaseDeployment.BaseD
         siteSpecs.put(ADMIN_USER_SITE_SPEC, deployment.getService().getAdminUser());
         siteSpecs.put(ADMIN_PASSWORD_SITE_SPEC, deployment.getService().getAdminPassword());
         spec.setSiteSpecs(siteSpecs);
+        spec.setStorageSpecs(defaultStorageSpecs());
         setSpec(spec);
+    }
+
+    private HashMap<String, Object> defaultStorageSpecs() {
+        var storage = new HashMap<String, Object>();
+        storage.put(BaseDeployment.StorageSpecFields.SIZE, "1Gi");
+        storage.put(BaseDeployment.StorageSpecFields.ACCESS_MODES, List.of("ReadWriteOnce"));
+        return storage;
     }
 
 
