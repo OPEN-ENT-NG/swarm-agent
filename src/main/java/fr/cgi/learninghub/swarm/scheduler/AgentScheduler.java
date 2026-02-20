@@ -182,34 +182,139 @@ AgentScheduler {
     private Uni<Void> deployServices() {
         // 1. Retrieve services that need a deployment
         return serviceRepository.listServicesByState(State.SCHEDULED)
-                // 2. Create and persist a Deployment object and update service state to IN_PROGRESS
-                .chain(services -> this.createDeploymentEntitiesAndUpdateServiceState(services, State.IN_PROGRESS))
-                // 3. In case of Prestashop, create admin credentials
-                .chain(this::createPrestashopAdminCredentials)
-                // 4. In case of WordPress, create admin credentials
-                .chain(this::createWordpressAdminCredentials)
-                // 5. FInd the Deployment database and persist it
-                .chain(this::findDeploymentDatabase)
-                // 6. Based on the Deployment database configuration, create the remote user with password, create the database
-                .chain(this::createRemoteDatabase)
-                .chain(this::removeDeploymentsInError)
-                // 7. Create CRD and send CRD to Kubernetes cluster
-                .chain(this::deployToK8s)
-                .chain(this::removeDeploymentsInError)
-                // 8. log
-                .onItem().transform(deployments -> {
-                    deployments.forEach(deployment -> Log.infov("[Service {0}] deployment created {1}", deployment.getService().getId(), deployment.toString()));
-
-                    return deployments;
-                })
-                // 9. Check the pod is ready
-                .chain(this::keepReadyDeployments)
-                .chain(this::createIngress)
-                .chain(this::removeDeploymentsInError)
-                //10. If pod is ready, change state to DEPLOYED
-                .chain(this::updateServicesStateToDeployed)
-                .replaceWithVoid();
+            // 2. Plan: new deployments vs restore deployments (admin-triggered)
+            .chain(this::planDeployments)
+            // 3. Deploy new services
+            .chain(plan -> deployNewServices(plan.newDeployments())
+                // 4. Restore existing services (CR missing but DB exists)
+                .chain(() -> restoreServices(plan.restoreDeployments())));
     }
+
+        private Uni<Void> deployNewServices(List<Deployment> deployments) {
+        if (deployments.isEmpty()) {
+            return Uni.createFrom().voidItem();
+        }
+
+        return Uni.createFrom().item(deployments)
+            // 1. In case of Prestashop, create admin credentials
+            .chain(this::createPrestashopAdminCredentials)
+            // 2. In case of WordPress, create admin credentials
+            .chain(this::createWordpressAdminCredentials)
+            // 3. Find the Deployment database and persist it
+            .chain(this::findDeploymentDatabase)
+            // 4. Based on the Deployment database configuration, create the remote user with password, create the database
+            .chain(this::createRemoteDatabase)
+            .chain(this::removeDeploymentsInError)
+            // 5. Create CRD and send CRD to Kubernetes cluster
+            .chain(this::deployToK8s)
+            .chain(this::removeDeploymentsInError)
+            // 6. log
+            .onItem().transform(deploymentsToLog -> {
+                deploymentsToLog.forEach(deployment -> Log.infov("[Service {0}] deployment created {1}", deployment.getService().getId(), deployment.toString()));
+
+                return deploymentsToLog;
+            })
+            // 7. Check the pod is ready
+            .chain(this::keepReadyDeployments)
+            .chain(this::createIngress)
+            .chain(this::removeDeploymentsInError)
+            // 8. If pod is ready, change state to DEPLOYED
+            .chain(this::updateServicesStateToDeployed)
+            .replaceWithVoid();
+        }
+
+        private Uni<Void> restoreServices(List<Deployment> deployments) {
+        if (deployments.isEmpty()) {
+            return Uni.createFrom().voidItem();
+        }
+
+        return Uni.createFrom().item(deployments)
+            // 1. Validate database existence using metadata query
+            .chain(this::ensureDatabaseExists)
+            .chain(this::removeDeploymentsInError)
+            // 2. Recreate CRD and send CRD to Kubernetes cluster
+            .chain(this::deployToK8s)
+            .chain(this::removeDeploymentsInError)
+            // 3. Check the pod is ready
+            .chain(this::keepReadyDeployments)
+            .chain(this::createIngress)
+            .chain(this::removeDeploymentsInError)
+            // 4. If pod is ready, change state to DEPLOYED
+            .chain(this::updateServicesStateToDeployed)
+            .replaceWithVoid();
+        }
+
+        private Uni<DeploymentPlan> planDeployments(List<Service> services) {
+        if (services.isEmpty()) {
+            return Uni.createFrom().item(new DeploymentPlan(List.of(), List.of()));
+        }
+
+        return Multi.createFrom().iterable(services)
+            .onItem().transformToUniAndConcatenate(service -> deploymentRepository.findByServiceId(service.getId())
+                .onItem().transformToUni(existingDeployment -> {
+                    if (existingDeployment != null) {
+                    return updateServiceState(existingDeployment, State.IN_PROGRESS)
+                        .onItem().transform(dep -> new PlannedDeployment(dep, false));
+                    }
+
+                    return createDeploymentEntity(service)
+                        .onItem().transformToUni(dep -> updateServiceState(dep, State.IN_PROGRESS))
+                        .onItem().transform(dep -> new PlannedDeployment(dep, true));
+                }))
+            .collect().asList()
+            .onItem().transform(planned -> {
+                var newDeployments = planned.stream()
+                    .filter(PlannedDeployment::isNew)
+                    .map(PlannedDeployment::deployment)
+                    .toList();
+                var restoreDeployments = planned.stream()
+                    .filter(plannedDeployment -> !plannedDeployment.isNew())
+                    .map(PlannedDeployment::deployment)
+                    .toList();
+                return new DeploymentPlan(newDeployments, restoreDeployments);
+            });
+        }
+
+        private Uni<List<Deployment>> ensureDatabaseExists(List<Deployment> deployments) {
+        return Multi.createFrom().iterable(deployments)
+            .onItem().transformToUniAndConcatenate(deployment ->
+                databaseFactory.getDatabaseService(deployment.getService()).databaseExists(deployment)
+                    .onItem().transformToUni(exists -> {
+                        if (exists) {
+                        return Uni.createFrom().item(deployment);
+                        }
+
+                        Log.warnv(
+                            "[Service {0}] database {1} not found; marking deployment as failed",
+                            deployment.getService().getId(),
+                            deployment.getDbName()
+                        );
+                        return setDeploymentError(
+                            deployment,
+                            "Database not found in MariaDB metadata",
+                            State.DEPLOYMENT_IN_ERROR
+                        );
+                    })
+                    .onFailure().recoverWithUni(throwable -> {
+                        Log.warnv(
+                            "[Service {0}] database existence check failed: {1}",
+                            deployment.getService().getId(),
+                            throwable.getMessage()
+                        );
+                        return setDeploymentError(
+                            deployment,
+                            throwable.getMessage(),
+                            State.DEPLOYMENT_IN_ERROR
+                        );
+                    }))
+            .collect().asList();
+        }
+
+        private record PlannedDeployment(Deployment deployment, boolean isNew) {
+        }
+
+        private record DeploymentPlan(List<Deployment> newDeployments, List<Deployment> restoreDeployments) {
+        }
 
     private Uni<List<Deployment>> createPrestashopAdminCredentials(List<Deployment> deployments) {
         return Multi.createFrom().iterable(deployments.stream().map(deployment -> {

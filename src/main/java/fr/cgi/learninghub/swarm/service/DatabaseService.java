@@ -13,6 +13,7 @@ import io.vertx.core.net.PemTrustOptions;
 import io.vertx.mutiny.core.Vertx;
 import io.vertx.mutiny.mysqlclient.MySQLBuilder;
 import io.vertx.mutiny.sqlclient.Pool;
+import io.vertx.mutiny.sqlclient.Tuple;
 import io.vertx.mysqlclient.MySQLConnectOptions;
 import io.vertx.mysqlclient.SslMode;
 import jakarta.inject.Inject;
@@ -80,6 +81,19 @@ public abstract class DatabaseService {
         return dropUser(getDefaultPool(deployment), deployment)
                 .onItem().transformToUni(transientRecord -> dropDatabase(transientRecord.pool(), transientRecord.deployment()))
                 .onItem().transformToUni(transientRecord -> transientRecord.pool().close().onItem().transformToUni(unused -> Uni.createFrom().item(transientRecord.deployment())));
+    }
+
+    public Uni<Boolean> databaseExists(Deployment deployment) {
+        if (Objects.isNull(deployment.getDatabase()) || Objects.isNull(deployment.getDbName())) {
+            return Uni.createFrom().failure(new NullDatabaseException());
+        }
+
+        var pool = getDefaultPool(deployment);
+        return pool.preparedQuery("SELECT 1 FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?")
+                .execute(Tuple.of(deployment.getDbName()))
+                .onItem().transform(rows -> rows.size() > 0)
+                .onItem().transformToUni(exists -> pool.close().replaceWith(exists))
+                .onFailure().call(() -> pool.close());
     }
 
     private Uni<TransientRecord> dropUser(Pool pool, Deployment deployment) {
