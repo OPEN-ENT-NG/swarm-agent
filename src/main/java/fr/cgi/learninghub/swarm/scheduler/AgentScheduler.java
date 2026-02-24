@@ -124,6 +124,8 @@ AgentScheduler {
         return this.updateServiceStateToResetInProgress(deployments)
                 // 2. Delete service from kubernetes
                 .chain(this::deleteFromK8s)
+                // 2b. Delete associated PVCs
+                .chain(this::deletePVCs)
                 .chain(this::removeDeploymentsInError)
                 .chain(this::deleteIngress)
                 .chain(this::removeDeploymentsInError)
@@ -154,6 +156,34 @@ AgentScheduler {
                 //10. If pod is ready, change state to DEPLOYED
                 .chain(this::updateServicesStateToDeployed)
                 .replaceWithVoid();
+    }
+    /**
+     * Supprime les PVC associés à chaque déploiement (même nom que le service, dans le namespace du service)
+     */
+    private Uni<List<Deployment>> deletePVCs(List<Deployment> deployments) {
+        if (deployments.isEmpty()) {
+            return Uni.createFrom().item(deployments);
+        }
+        return Multi.createFrom().iterable(deployments)
+                .onItem().transformToUniAndConcatenate(deployment -> {
+                    String namespace = clusterConfiguration.getK8sNamespace();
+                    String pvcName = deployment.getService().getServiceName();
+                    try {
+                        var pvcResource = k8sClient.persistentVolumeClaims()
+                                .inNamespace(namespace)
+                                .withName(pvcName);
+                        if (pvcResource.get() != null) {
+                            pvcResource.delete();
+                            Log.infov("[Service {0}] PVC {1} supprimé dans le namespace {2}", pvcName, pvcName, namespace);
+                        } else {
+                            Log.infov("[Service {0}] Aucun PVC {1} à supprimer dans le namespace {2}", pvcName, pvcName, namespace);
+                        }
+                    } catch (Exception e) {
+                        Log.warnv("[Service {0}] Erreur lors de la suppression du PVC {1} : {2}", pvcName, pvcName, e.getMessage());
+                    }
+                    return Uni.createFrom().item(deployment);
+                })
+                .collect().asList();
     }
 
     private Uni<Void> deleteDeployments(List<Deployment> deployments) {
