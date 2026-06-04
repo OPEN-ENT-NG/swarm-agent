@@ -4,6 +4,7 @@ import fr.cgi.learning.hub.swarm.common.entities.Service;
 import fr.cgi.learning.hub.swarm.common.enums.State;
 import fr.cgi.learning.hub.swarm.common.enums.Type;
 import fr.cgi.learninghub.swarm.cluster.ClusterConfiguration;
+import fr.cgi.learninghub.swarm.cluster.EnvoyHTTPRoute;
 import fr.cgi.learninghub.swarm.cluster.NginxIngress;
 import fr.cgi.learninghub.swarm.deployment.DatabaseSecret;
 import fr.cgi.learninghub.swarm.deployment.DeploymentFactory;
@@ -480,6 +481,13 @@ AgentScheduler {
     }
 
     private Uni<List<Deployment>> deleteIngress(List<Deployment> deployments) {
+        if (clusterConfiguration.isUseHTTPRoute()) {
+            return deleteHTTPRoute(deployments);
+        }
+        return deleteIngressNginx(deployments);
+    }
+
+    private Uni<List<Deployment>> deleteIngressNginx(List<Deployment> deployments) {
         if (deployments.isEmpty()) {
             return Uni.createFrom().item(deployments);
         }
@@ -519,8 +527,55 @@ AgentScheduler {
                 .collect().asList();
     }
 
+    private Uni<List<Deployment>> deleteHTTPRoute(List<Deployment> deployments) {
+        if (deployments.isEmpty()) {
+            return Uni.createFrom().item(deployments);
+        }
+
+        Log.info("Deleting HTTPRoute");
+
+        return Multi.createFrom().iterable(deployments)
+                .onItem().transformToUniAndConcatenate(deployment -> {
+                    return vertx.executeBlocking(() -> {
+                                String routeName = "%s-%s".formatted(
+                                        deployment.getService().getType().getValue().toLowerCase(),
+                                        deployment.getService().getId()
+                                );
+                                
+                                Log.infov(
+                                        "Deleting HTTPRoute {0}",
+                                        routeName
+                                );
+
+                                return k8sClient.genericKubernetesResources(
+                                                "gateway.networking.k8s.io/v1",
+                                                "HTTPRoute"
+                                        )
+                                        .inNamespace(clusterConfiguration.getK8sNamespace())
+                                        .withName(routeName)
+                                        .delete();
+                            })
+                            .replaceWith(deployment)
+                            .onFailure().recoverWithUni(t ->
+                                    setDeploymentError(
+                                            deployment,
+                                            t.getMessage(),
+                                            State.DELETION_IN_ERROR
+                                    )
+                            );
+                })
+                .collect().asList();
+    }
+
 
     private Uni<List<Deployment>> createIngress(List<Deployment> deployments) {
+        if (clusterConfiguration.isUseHTTPRoute()) {
+            return createHTTPRoute(deployments);
+        }
+        return createIngressNginx(deployments);
+    }
+
+    private Uni<List<Deployment>> createIngressNginx(List<Deployment> deployments) {
         if (deployments.isEmpty()) {
             return Uni.createFrom().item(deployments);
         }
@@ -552,6 +607,54 @@ AgentScheduler {
                                             .ingresses()
                                             .inNamespace(clusterConfiguration.getK8sNamespace())
                                             .resource(ingress.get())
+                                            .createOr(NonDeletingOperation::update)
+                            )
+                            .replaceWith(deployment)
+                            .onFailure().recoverWithUni(t ->
+                                    setDeploymentError(
+                                            deployment,
+                                            t.getMessage(),
+                                            State.DEPLOYMENT_IN_ERROR
+                                    )
+                            );
+                })
+                .collect().asList();
+    }
+
+    private Uni<List<Deployment>> createHTTPRoute(List<Deployment> deployments) {
+        if (deployments.isEmpty()) {
+            return Uni.createFrom().item(deployments);
+        }
+
+        Log.info("Creating HTTPRoute");
+
+        return Multi.createFrom().iterable(deployments)
+                .onItem().transformToUniAndConcatenate(deployment -> {
+                    String routeName = "%s-%s".formatted(
+                            deployment.getService().getType().getValue().toLowerCase(),
+                            deployment.getService().getId()
+                    );
+
+                    var httpRoute = new EnvoyHTTPRoute(
+                            List.of(deployment),
+                            routeName
+                    ).setPublicHostName(clusterConfiguration.getServicePublicHostname())
+                     .setGatewayName(clusterConfiguration.getEnvoyGatewayName())
+                     .setGatewayNamespace(clusterConfiguration.getEnvoyGatewayNamespace())
+                     .setSectionName(clusterConfiguration.getEnvoyGatewaySectionName());
+
+                    Log.infov(
+                            "Creating HTTPRoute {0}",
+                            routeName
+                    );
+
+                    return vertx.executeBlocking(() ->
+                                    k8sClient.genericKubernetesResources(
+                                                    EnvoyHTTPRoute.API_VERSION,
+                                                    EnvoyHTTPRoute.KIND
+                                            )
+                                            .inNamespace(clusterConfiguration.getK8sNamespace())
+                                            .resource(httpRoute.get())
                                             .createOr(NonDeletingOperation::update)
                             )
                             .replaceWith(deployment)

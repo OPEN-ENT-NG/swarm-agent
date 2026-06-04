@@ -30,6 +30,19 @@ public class ClusterConfiguration {
     @ConfigProperty(name = "swarm.agent.kubernetes.ingress.class.name", defaultValue = "nginx")
     private String ingressClassName;
 
+    // Configuration pour HTTPRoute (Envoy Gateway) - ACTIVÉ PAR DÉFAUT
+    @ConfigProperty(name = "swarm.agent.kubernetes.use.httproute", defaultValue = "true")
+    private boolean useHTTPRoute;
+
+    @ConfigProperty(name = "swarm.agent.kubernetes.envoy.gateway.name", defaultValue = "public-gateway")
+    private String envoyGatewayName;
+
+    @ConfigProperty(name = "swarm.agent.kubernetes.envoy.gateway.namespace", defaultValue = "envoy")
+    private String envoyGatewayNamespace;
+
+    @ConfigProperty(name = "swarm.agent.kubernetes.envoy.gateway.section", defaultValue = "https")
+    private String envoyGatewaySectionName;
+
     public String getK8sNamespace() {
         return k8sNamespace;
     }
@@ -99,5 +112,41 @@ public class ClusterConfiguration {
 
     public void setWpEmailHostname(String wpEmailHostname) {
         this.wpEmailHostname = wpEmailHostname;
+    }
+
+    public boolean isUseHTTPRoute() {
+        return useHTTPRoute;
+    }
+
+    public ClusterConfiguration setUseHTTPRoute(boolean useHTTPRoute) {
+        this.useHTTPRoute = useHTTPRoute;
+        return this;
+    }
+
+    public String getEnvoyGatewayName() {
+        return envoyGatewayName;
+    }
+
+    public ClusterConfiguration setEnvoyGatewayName(String envoyGatewayName) {
+        this.envoyGatewayName = envoyGatewayName;
+        return this;
+    }
+
+    public String getEnvoyGatewayNamespace() {
+        return envoyGatewayNamespace;
+    }
+
+    public ClusterConfiguration setEnvoyGatewayNamespace(String envoyGatewayNamespace) {
+        this.envoyGatewayNamespace = envoyGatewayNamespace;
+        return this;
+    }
+
+    public String getEnvoyGatewaySectionName() {
+        return envoyGatewaySectionName;
+    }
+
+    public ClusterConfiguration setEnvoyGatewaySectionName(String envoyGatewaySectionName) {
+        this.envoyGatewaySectionName = envoyGatewaySectionName;
+        return this;
     }
 }
